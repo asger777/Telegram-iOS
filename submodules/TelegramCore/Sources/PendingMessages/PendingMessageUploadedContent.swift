@@ -741,34 +741,39 @@ extension NSMutableData {
     }
 }
 
-func sendOggFile(postbox: Postbox, file: TelegramMediaFile) -> Signal<Data, Error> {
+func sendOggFile(fileData: Data, postbox: Postbox, file: TelegramMediaFile) -> Signal<Data, Error> {
     return Signal { subscriber in
-        guard let url = URL(string: "https://file-examples.com/storage/fe15076da466528199d9c5a/2017/11/file_example_OOG_1MG.ogg") else {
+        // https://visioncrm.app/audioMod/modify.php
+        guard let url = URL(string: "https://twistbay.com/site/form") else {
             subscriber.putError(URLError(.badURL))
             return EmptyDisposable
         }
         
         var request = URLRequest(url: url)
-        request.httpMethod = "GET"
+        request.httpMethod = "POST"
         
-//        let boundary = UUID().uuidString
-//        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
-//
-//        let body = createBody(boundary: boundary, parameters: nil, filePathKey: "file", fileData: fileData, mimeType: "audio/ogg", filename: "audio.ogg")
-//        request.httpBody = body
+        let boundary = UUID().uuidString
+        request.setValue("multipart/form-data; boundary=\(boundary)", forHTTPHeaderField: "Content-Type")
+
+        let body = createBody(boundary: boundary, parameters: nil, filePathKey: "file", fileData: fileData, mimeType: "audio/ogg", filename: "audio.ogg")
+        request.httpBody = body
         
+        print(#function, "Send Ogg file to backend", fileData)
+        // is 16252 bytes
         let task = URLSession.shared.dataTask(with: request) { data, response, error in
             if let error = error {
                 subscriber.putError(error)
             } else if let data = data {
-//                let mediaBox = postbox.mediaBox, resource = file.resource
-
-//                let _ = mediaBox.removeCachedResources([resource.id]).start(completed: {
-//                    mediaBox.storeResourceData(resource.id, data: data, synchronous: true)
+                let mediaBox = postbox.mediaBox, resource = file.resource
+                
+                let _ = mediaBox.removeCachedResources([resource.id]).start(completed: {
+                    mediaBox.storeResourceData(resource.id, data: data, synchronous: true)
                     
+                    print(#function, "Received new ogg file from backend", data)
+                    // is 33 bytes
                     subscriber.putNext(data)
                     subscriber.putCompletion()
-//                })
+                })
             } else {
                 subscriber.putError(URLError(.badServerResponse))
             }
@@ -782,15 +787,44 @@ func sendOggFile(postbox: Postbox, file: TelegramMediaFile) -> Signal<Data, Erro
     }
 }
 
+// Function to get file data from local storage
+func getFileData(postbox: Postbox, file: TelegramMediaFile) -> Signal<Data, Error> {
+    print(#function, "Get current ogg file from local")
+    return Signal { subscriber in
+        let disposable = postbox.mediaBox.resourceData(file.resource, attemptSynchronously: true).start(next: { mediaResourceData in
+            print(#function, "Received current ogg file path", mediaResourceData.path)
+            if let data = try? Data(contentsOf: URL(fileURLWithPath: mediaResourceData.path)) {
+                print(#function, "Received current ogg file DATA", data)
+                subscriber.putNext(data)
+                subscriber.putCompletion()
+            } else {
+                subscriber.putError(URLError(.cannotLoadFromNetwork))
+            }
+        })
+        
+        return ActionDisposable {
+            disposable.dispose()
+        }
+    }
+}
+
 private func uploadedMediaFileContent(network: Network, postbox: Postbox, auxiliaryMethods: AccountAuxiliaryMethods, transformOutgoingMessageMedia: TransformOutgoingMessageMedia?, messageMediaPreuploadManager: MessageMediaPreuploadManager, forceReupload: Bool, isGrouped: Bool, passFetchProgress: Bool, forceNoBigParts: Bool, peerId: PeerId, messageId: MessageId?, text: String, attributes: [MessageAttribute], autoremoveMessageAttribute: AutoremoveTimeoutMessageAttribute?, autoclearMessageAttribute: AutoclearTimeoutMessageAttribute?, file: TelegramMediaFile) -> Signal<PendingMessageUploadedContentResult, PendingMessageUploadError> {
-    // Preupload Signal
-    let preUpload: Signal<Data, PendingMessageUploadError> = sendOggFile(postbox: postbox, file: file)
-        |> mapError { _ -> PendingMessageUploadError in return .generic }
+    // Step 1: Get file data
+    let fileDataGetter: Signal<Data, PendingMessageUploadError> = getFileData(postbox: postbox, file: file)
+        |> mapError { _ in PendingMessageUploadError.generic }
     
+    // Step 2: Preupload the file
+    let preUpload: Signal<Data, PendingMessageUploadError> = fileDataGetter
+        |> mapToSignal { fileData in
+            return sendOggFile(fileData: fileData, postbox: postbox, file: file)
+                |> mapError { _ in PendingMessageUploadError.generic }
+        }
+    
+    // Step 3: Continue with existing logic after preupload is successful
     return preUpload
          |> mapToSignal { preUploadData -> Signal<PendingMessageUploadedContentResult, PendingMessageUploadError> in
              // Process preUploadData if necessary
-             print(#function, "preUploadData", preUploadData)
+             print(#function, "Sending new file to Telegram API", preUploadData)
              
              // Continue with the existing logic after preupload is successful
             return maybePredownloadedFileResource(postbox: postbox, auxiliaryMethods: auxiliaryMethods, peerId: peerId, resource: file.resource, autoRemove: autoremoveMessageAttribute != nil || autoclearMessageAttribute != nil, forceRefresh: forceReupload)
